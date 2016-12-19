@@ -39,7 +39,7 @@ class MastodonAPI:
             response = requests.request(
                 method, url, data=parameters, headers=headers, files=files)
             response.raise_for_status()
-        except (RequestException, HTTPError):
+        except (requests.exceptions.RequestException):
             raise NetworkError("The request was not completed.")
         try:
             result = response.json()
@@ -105,12 +105,14 @@ class MastodonAPI:
     def get_status(self, id):
         return self.make_request("GET", "/api/v1/statuses/{0!s}".format(id))
 
-    def post_status(self, status, in_reply_to_id=None, media_ids=None):
+    def post_status(self, status, in_reply_to_id=None, media_ids=None, unlisted=False):
         parameters = {"status": status}
         if in_reply_to_id:
             parameters["in_reply_to_id"] = in_reply_to_id
         if media_ids:
             parameters["media_ids[]"] = media_ids
+        if unlisted:
+            parameters["unlisted"] = True
         return self.make_request("POST", "/api/v1/statuses", parameters)
 
     def post_media(self, filename):
@@ -147,7 +149,7 @@ def get_client_credentials(base_url, client_name, credential_filename):
             client_secret = file.readline().rstrip()
     except FileNotFoundError as error:
         _v_print("Registering to {} as {}".format(base_url, client_name))
-        response = MastodonAPI.register_app_with_oauth_app(
+        response = MastodonAPI.register_app_with_oauth(
             base_url, client_name)
         client_id = response["client_id"]
         client_secret = response["client_secret"]
@@ -1126,7 +1128,7 @@ def get_diamond_square_field(side):
     return diamond.convert(mode="R")
 
 def map_r_to_rgb(r_image, rgb_image, palette):
-    steps = len(palette) - 1
+    steps = len(palette) - 2
     for y in range(r_image.size[1]):
         for x in range(r_image.size[0]):
             r = byte_to_unorm(r_image.get_pixel_r((x, y)))
@@ -1135,14 +1137,17 @@ def map_r_to_rgb(r_image, rgb_image, palette):
             rgb = rgb_lerp(palette[i], palette[i + 1], q - i)
             rgb_image.put_pixel_rgb((x, y), rgb)
 
-def make_circle_brush(radius):
+def make_paint_brush(radius):
     side = 2 * radius + 1
-    diamond = get_diamond_square_field(side)
-    paint = Canvas(mode="RGB", size=diamond.size)
-    palette = generate_random_flat_palette(5)
-    map_r_to_rgb(diamond, paint, palette)
-    alpha = Canvas(mode="R", size=paint.size)
-    draw_circle_falloff(alpha, 0.5)
+    if random.randint(0, 7):
+        pattern = generate_scalar_field(size=(side, side))
+    else:
+        pattern = get_diamond_square_field(side)
+    paint = Canvas(mode="RGB", size=pattern.size)
+    steps = random.randint(3, 9)
+    palette = generate_random_flat_palette(steps)
+    map_r_to_rgb(pattern, paint, palette)
+    alpha = choose_brush_shape(paint.size)
     paint.put_and_premultiply_alpha(alpha)
     return paint
 
@@ -1238,23 +1243,33 @@ def blend_scalar_fields(canvas, image, top_left, alpha):
             result = lerp(p0, p1, alpha)
             canvas.put_pixel_r(uv, result)
 
-def generate_brush_shape(size):
-    kind = random.randint(0, 1)
+def choose_brush_shape(size):
+    kind = random.randint(0, 4)
     shape = Canvas(mode="R", size=size)
-    if kind == 0:
+    if kind == 0: # Fake 2D Gaussian Shape
         draw_radial_falloff(shape)
-    elif kind == 1:
+    elif kind == 1: # Sharp Polygon
         sides = random.randint(3, 8)
         draw_polygonal_falloff(shape, sides)
+    elif kind == 2: # Smooth Polygon
+        sides = random.randint(3, 8)
+        margin = random.uniform(0, 1)
+        draw_polygonal_falloff(shape, sides, margin)
+    elif kind == 3: # Sharp Circle
+        draw_circle_falloff(shape, 1)
+    elif kind == 4: # Smooth Circle
+        radius = random.uniform(0, 1)
+        draw_circle_falloff(shape, radius)
+    return shape
 
 # Brushes!....................................................................
 
 class SmudgeBrush:
     def __init__(self, radius):
         side = 2 * radius + 1
-        self.paint = Canvas(mode="RGB", size=(side, side))
-        self.alpha = Canvas(mode="R", size=self.paint.size)
-        draw_radial_falloff(self.alpha)
+        size = (side, side)
+        self.paint = Canvas(mode="RGB", size=size)
+        self.alpha = choose_brush_shape(size)
         self.prior_point = (0.0, 0.0)
         self.radius = radius
 
@@ -1394,104 +1409,6 @@ class DistortionBrush:
             self.draw_at_point(image, point, strength)
         self.draw_at_point(image, end, strength)
 
-# Test Functions?.............................................................
-
-def debug_draw_image(canvas, image, top_left):
-    image = image.convert("RGB")
-    for y in range(image.size[1]):
-        for x in range(image.size[0]):
-            p = image.get_pixel_rgb((x, y))
-            canvas.put_pixel_rgb(Vector2.add(top_left, (x, y)), p)
-
-def debug_draw_palette(image, palette, top_left):
-    width = 20
-    height = 20
-    for i in range(len(palette)):
-        for y in range(height):
-            for x in range(width):
-                point = Vector2.add(top_left, (x, height * i + y))
-                image.put_pixel_rgb(point, palette[i])
-
-def test_smudge_brush(image, point_collection):
-    smudger = SmudgeBrush(4)
-    strength = 0.5
-    start_point = random.choice(point_collection)
-    smudger.begin_smudge(image, start_point)
-    for i in range(5):
-        point = random.choice(point_collection)
-        smudger.stroke_smudge(image, point, strength)
-
-def test_hypotrochoid(image, image_palette, point_collection):
-    kind = random.randint(0, 2)
-    if kind == 0: # general hypotrochoid
-        r = random.randint(20, 90)
-        R = random.randint(r + 1, 92)
-        d = random.randint(40, 90)
-    elif kind == 1: # ellipse
-        r = random.randint(20, 45)
-        R = 2 * r
-        d = random.randint(40, 90)
-    elif kind == 2: # hypocycloid
-        r = random.randint(20, 90)
-        R = random.randint(r + 1, 92)
-        d = r
-    curves = 4
-    """
-    start_hue = random.uniform(0, 3)
-    rotations = random.choice([-1, 1]) * random.uniform(0, 2)
-    colours, low, high = cube_helix(
-        levels=curves,
-        start_hue=start_hue,
-        rotations=rotations)
-    """
-    colours = image_palette
-    separation = random.randint(1, 5)
-    center = random.choice(point_collection)
-    for i in range(curves):
-        colour = colours[i]
-        d += separation
-        draw_hypotrochoid(image, center=center, R=R, r=r, d=d, colour=colour)
-
-def test_epitrochoid(image, point_collection):
-    r = random.randint(20, 50)
-    R = random.randint(20, 50)
-    d = random.randint(10, 80)
-    # Generate the palette.
-    curves = 5
-    if random.randint(0, 1):
-        colours = generate_roughly_increasing_palette(curves)
-    else:
-        start_hue = random.uniform(0, 3)
-        rotations = random.choice([-1, 1]) * random.uniform(0, 2)
-        colours, low, high = cube_helix(
-            levels=curves,
-            start_hue=start_hue,
-            rotations=rotations)        
-    # Draw all the curves.
-    separation = random.randint(1, 4)
-    center = random.choice(point_collection)
-    for i in range(curves):
-        colour = colours[i]
-        d += separation
-        draw_epitrochoid(image, center=center, R=R, r=r, d=d, colour=colour)
-
-def test_metaballs(image, point_collection):
-    paint = Canvas(mode="RGBA", size=(40, 40))
-    bounds = paint.get_bounds()
-    metaballs = make_metaballs(bounds)
-    steps = random.randint(1, 5)
-    threshold = random.randint(50, 200)
-    palette = generate_random_flat_palette(steps)
-    draw_step_metaballs(paint, bounds, metaballs, palette, threshold)
-    brush = PaintBrush(paint)
-    start = random.choice(point_collection)
-    end = random.choice(point_collection)
-    brush.draw_stroke(image, start, end, 20)
-
-def test_waves_expresser(image):
-    wavery = generate_scalar_field(size=(64, 64))
-    debug_draw_image(image, wavery, (0, 0))
-
 # Spline Functions............................................................
 
 def segment_catmull_rom(p0, p1, p2, p3, segments):
@@ -1568,6 +1485,105 @@ def draw_curvy_stroke(image, brush, start, end, spacing):
         angle = random.uniform(-math.pi, math.pi)
         brush.draw_at_point(image, point, angle, scale=s)
 
+# Test Functions?.............................................................
+
+def debug_draw_image(canvas, image, top_left):
+    image = image.convert("RGB")
+    for y in range(image.size[1]):
+        for x in range(image.size[0]):
+            p = image.get_pixel_rgb((x, y))
+            canvas.put_pixel_rgb(Vector2.add(top_left, (x, y)), p)
+
+def debug_draw_palette(image, palette, top_left):
+    width = 20
+    height = 20
+    for i in range(len(palette)):
+        for y in range(height):
+            for x in range(width):
+                point = Vector2.add(top_left, (x, height * i + y))
+                image.put_pixel_rgb(point, palette[i])
+
+def test_smudge_brush(image, point_collection, repeats):
+    radius = random.randint(2, 10)
+    smudger = SmudgeBrush(radius)
+    strength = random.uniform(0.2, 1)
+    start_point = random.choice(point_collection)
+    smudger.begin_smudge(image, start_point)
+    for i in range(repeats):
+        point = random.choice(point_collection)
+        smudger.stroke_smudge(image, point, strength)
+
+def choose_palette(image_palette, repeats):
+    if repeats == 1:
+        if random.randint(0, 1):
+            return image_palette
+        else:
+            return generate_random_flat_palette(1)
+    else:
+        which = random.randint(0, 3)
+        if which == 0:
+            start_hue = random.uniform(0, 3)
+            rotations = random.choice([-1, 1]) * random.uniform(0, 2)
+            palette, low, high = cube_helix(
+                levels=repeats,
+                start_hue=start_hue,
+                rotations=rotations)
+            return palette
+        elif which == 1:
+            return generate_random_flat_palette(repeats)
+        elif which == 2:
+            return generate_roughly_increasing_palette(repeats)
+        elif which == 3:
+            return image_palette
+
+def test_hypotrochoid(image, image_palette, point_collection, repeats):
+    kind = random.randint(0, 2)
+    if kind == 0: # general hypotrochoid
+        r = random.randint(20, 90)
+        R = random.randint(r + 1, 92)
+        d = random.randint(40, 90)
+    elif kind == 1: # ellipse
+        r = random.randint(20, 45)
+        R = 2 * r
+        d = random.randint(40, 90)
+    elif kind == 2: # hypocycloid
+        r = random.randint(20, 90)
+        R = random.randint(r + 1, 92)
+        d = r
+    colours = choose_palette(image_palette, repeats)
+    separation = random.randint(1, 5)
+    center = random.choice(point_collection)
+    for i in range(repeats):
+        colour = colours[i]
+        d += separation
+        draw_hypotrochoid(image, center=center, R=R, r=r, d=d, colour=colour)
+
+def test_epitrochoid(image, image_palette, point_collection, repeats):
+    r = random.randint(20, 50)
+    R = random.randint(20, 50)
+    d = random.randint(10, 80)
+    colours = choose_palette(image_palette, repeats)
+    separation = random.randint(1, 4)
+    center = random.choice(point_collection)
+    for i in range(repeats):
+        colour = colours[i]
+        d += separation
+        draw_epitrochoid(image, center=center, R=R, r=r, d=d, colour=colour)
+
+def test_metaballs(image, point_collection):
+    paint = Canvas(mode="RGBA", size=(40, 40))
+    bounds = paint.get_bounds()
+    metaballs = make_metaballs(bounds)
+    steps = random.randint(1, 5)
+    threshold = random.randint(50, 200)
+    palette = generate_random_flat_palette(steps)
+    draw_step_metaballs(paint, bounds, metaballs, palette, threshold)
+    brush = PaintBrush(paint)
+    start = random.choice(point_collection)
+    end = random.choice(point_collection)
+    scale = random.uniform(10, 30)
+    brush.draw_stroke(image, start, end, scale)
+
 def test_splines(image, point_collection):
     # Make a brush.
     paint = Canvas(mode="RGBA", size=(10, 10))
@@ -1598,9 +1614,10 @@ def test_splines(image, point_collection):
 
 # Main........................................................................
 
-def main(argv):
+def main():
     """This here is the real deal."""
-    program_name = "mastodon.py"
+    argv = sys.argv[1:]
+    program_name = "overpaint_bot.py"
     parser = argparse.ArgumentParser(
         prog=program_name,
         description="This is an art bot that posts to the microblogging "
@@ -1621,6 +1638,10 @@ def main(argv):
         nargs=1,
         required=True,
         help="the login password for the account this bot should use")
+    parser.add_argument(
+        "--unlisted",
+        help="won't post the output image to the public timeline",
+        action="store_true")
     arguments = parser.parse_args(argv)
     # Set the verbose printing global function pointer.
     if arguments.verbose:
@@ -1635,10 +1656,8 @@ def main(argv):
     client_id, client_secret = get_client_credentials(
         base_url, program_name, "mastodon_client_credentials.txt")
     api = MastodonAPI(base_url, client_id, client_secret)
-    """
     access_token = api.log_in(arguments.username, arguments.password)
     _v_print("Obtained access token {}.\n".format(access_token))
-    """
     # Open the image generated in the previous run of this bot.
     image_name = "image.png"
     try:
@@ -1663,27 +1682,39 @@ def main(argv):
     for i in range(len(pixel_data)):
         image_pixels[i] = pack_rgb(pixel_data[i])
     image = Canvas(mode="RGB", size=image.size, pixels=image_pixels)
-    # Smudge that boy up.
-    test_smudge_brush(image, point_collection)
-    # Test the centered trochoids.
-    test_hypotrochoid(image, image_palette, point_collection)
-    test_epitrochoid(image, point_collection)
-    # Test the paint brush.
-    brush = PaintBrush(make_circle_brush(8))
-    start = random.choice(point_collection)
-    end   = random.choice(point_collection)
-    brush.draw_stroke(image, start, end, 6)
-    # Test the distortion brush.
-    smoosher = DistortionBrush(60)
-    start = random.choice(point_collection)
-    end   = random.choice(point_collection)
-    smoosher.draw_stroke(image, start, end, 30)
-    # Test the metaballs.
-    test_metaballs(image, point_collection)
-    # Test the wave expresser.
-    test_waves_expresser(image)
-    # Test splines.
-    test_splines(image, point_collection)
+    # Start with a set amount of juice. Use that juice on actions until it runs
+    # out.
+    juice = 9
+    while juice:
+        action = random.randint(0, 6)
+        if action == 0:
+            # Smudge that boy up.
+            if random.randint(0, 1):
+                repeats = 1
+            else:
+                repeats = random.randint(2, 10)
+            test_smudge_brush(image, point_collection, repeats)
+        elif action == 1:
+            repeats = random.randint(1, 9)
+            test_hypotrochoid(image, image_palette, point_collection, repeats)
+        elif action == 2:
+            repeats = random.randint(1, 9)
+            test_epitrochoid(image, image_palette, point_collection, repeats)
+        elif action == 3:
+            brush = PaintBrush(make_paint_brush(8))
+            start = random.choice(point_collection)
+            end   = random.choice(point_collection)
+            brush.draw_stroke(image, start, end, 6)
+        elif action == 4:
+            smoosher = DistortionBrush(random.randint(10, 80))
+            start = random.choice(point_collection)
+            end   = random.choice(point_collection)
+            smoosher.draw_stroke(image, start, end, 30)
+        elif action == 5:
+            test_metaballs(image, point_collection)
+        elif action == 6:
+            test_splines(image, point_collection)
+        juice -= 1
     # Convert our image type to a Pillow image so it can save it.
     image = Image.frombytes(
         mode="RGBX",
@@ -1698,13 +1729,11 @@ def main(argv):
         print("{} was not be saved.".format(image_name))
         return 2
     # Post the image as a status.
-    """
     post_response = api.post_media(image_name)
     media_id = post_response["id"]
-    api.post_status("a cloudy toot from a bot", media_ids=[media_id])
-    """
+    api.post_status("🖌", media_ids=[media_id], unlisted=arguments.unlisted)
     return 0
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+    main()
 
